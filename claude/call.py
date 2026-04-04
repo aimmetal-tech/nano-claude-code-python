@@ -6,14 +6,15 @@ from claude.client import ClaudeClient
 from claude.message import (
     CLAUDE_MESSAGE_ROLE_ASSISTANT,
     CLAUDE_MESSAGE_ROLE_USER,
-    TextBlock,
 )
 from errors.errors import ClaudeClientError
 
 
-# TODO:流式响应中需要重构消息这一数据结构
 def deal_func(m: dict[str, Any]) -> bool:
-    print(m["content"]["text"])
+    if m["content"]["type"] == "text":
+        print(m["content"]["text"])
+    elif m["content"]["type"] == "tool_use":
+        print(f"正在调用工具: {m['content']['name']}, {m['content']['partial_json']}")
     return True
 
 
@@ -109,13 +110,14 @@ class StreamableChatModel(ChatModel):
     ):
         super().__init__(model=model, messages=messages, stream=stream, **kwargs)
 
-    def chat(self):
+    def chat_with_tools(self):
         """
         向 Claude API 发送聊天消息并以流式方式返回响应。
         """
+        body = self._get_request_body()
         response_body = self._session.post(
             url=f"{self.base_url}/v1/messages",
-            json=self.body,
+            json=body,
         )
         res_message: list[dict[str, Any]] = []
         try:
@@ -129,37 +131,83 @@ class StreamableChatModel(ChatModel):
                     data_json = line_str[6:]
                     data_dict = json.loads(data_json)
 
-                    event_type = data_dict.get("type", "type_not_found")
+                    event_type = data_dict["type"]
 
                     if event_type == "content_block_start":
                         res_message.append({"role": CLAUDE_MESSAGE_ROLE_ASSISTANT, "content": ""})
-                        content: Any = None
-                        content_block = data_dict.get("content_block", "no_content_block")
-                        text_value = content_block.get("text", "no_text")
-                        if text_value is not None:
-                            content = TextBlock(type="text", text=text_value)
+                        content = {}
+                        content_block = data_dict["content_block"]
 
-                        res_message[-1].content = content
+                        if content_block["type"] == "text":
+                            content = {"type": "text", "text": content_block["text"]}
+                        elif content_block["type"] == "tool_use":
+                            content = {
+                                "id": content_block["id"],
+                                "type": "tool_use",
+                                "name": content_block["name"],
+                            }
+                        res_message[-1]["content"] = content
                     elif event_type == "content_block_delta":
                         continue_flag = True
-                        if isinstance(res_message[-1].content, TextBlock):
-                            res_message[-1].content = TextBlock(
-                                type="text",
-                                text=res_message[-1].content.text
-                                + data_dict.get("delta", "no_delta").get("text", "no_text"),
-                            )
+                        if res_message[-1]["content"]["type"] == "text":
+                            res_message[-1]["content"] = {
+                                "type": "text",
+                                "text": res_message[-1]["content"]["text"]
+                                + data_dict["delta"]["text"],
+                            }
                             continue_flag = deal_func(
                                 {
                                     "role": CLAUDE_MESSAGE_ROLE_ASSISTANT,
-                                    "content": TextBlock(
-                                        type="text",
-                                        text=data_dict.get("delta").get("text"),
-                                    ),
+                                    "content": {
+                                        "type": "text",
+                                        "text": data_dict["delta"]["text"],
+                                    },
+                                }
+                            )
+                        elif res_message[-1]["content"]["type"] == "tool_use":
+                            current_content = res_message[-1]["content"]
+                            old_partial = current_content.get("partial_json", "")
+                            new_partial = data_dict["delta"]["partial_json"]
+
+                            current_content["partial_json"] = old_partial + new_partial
+
+                            continue_flag = deal_func(
+                                {
+                                    "role": CLAUDE_MESSAGE_ROLE_ASSISTANT,
+                                    "content": {
+                                        "type": "tool_use",
+                                        "id": current_content["id"],
+                                        "name": current_content["name"],
+                                        "partial_json": new_partial,
+                                    },
                                 }
                             )
 
                         if not continue_flag:
                             break
+
+            tool_use_blocks = [
+                item for item in res_message if item["content"]["type"] == "tool_use"
+            ]
+
+            if not tool_use_blocks:
+                return "".join(
+                    [
+                        item["content"]["text"]
+                        for item in res_message
+                        if item["content"]["type"] == "text"
+                    ]
+                )
+
+            for tool_use in tool_use_blocks:
+                tool_name = tool_use["content"]["name"]
+                target_tool = next((t for t in self.tools if t.name == tool_name), None)
+
+                if target_tool:
+                    args = json.loads(tool_use["content"]["partial_json"])
+                    result = target_tool.func(args)
+
+                    return result
 
         except Exception as e:
             raise ClaudeClientError(f"Error while streaming response: {str(e)}")
@@ -184,14 +232,14 @@ def newTestClient(
     )
 
 
-if __name__ == "__main__":
+def testChatModelWithTools():
     print("正在测试 ChatModelWithTools...")
     get_weather_tool = newTool(
         name="get_weather",
         description="获取一个城市当前的天气",
         properties={"city": ToolPropertyDetail(type="object", description="城市的名字")},
         required=["city"],
-        func=lambda args: f"当前{args['city']}的天气是晴天，温度25摄氏度。",
+        func=lambda args: f"当前{args['city']}的天气是晴天, 温度25摄氏度。",
     )
     test_client = ChatModel(
         base_url="https://api.phsharp.com",
@@ -201,3 +249,26 @@ if __name__ == "__main__":
     )
     print(f"api_key:{test_client.api_key},base_url:{test_client.base_url}")
     print(test_client.chat_with_tools())
+
+
+def testStreamableChatModelWithTools():
+    print("正在测试 StreamableChatModelWithTools...")
+    get_weather_tool = newTool(
+        name="get_weather",
+        description="获取一个城市当前的天气",
+        properties={"city": ToolPropertyDetail(type="object", description="城市的名字")},
+        required=["city"],
+        func=lambda args: f"当前{args['city']}的天气是晴天, 温度25摄氏度。",
+    )
+    test_client = StreamableChatModel(
+        base_url="https://api.phsharp.com",
+        model="claude-haiku-4-5",
+        messages=[{"role": "user", "content": "你好! 大连的天气怎么样？"}],
+        tools=[get_weather_tool],
+    )
+    print(f"api_key:{test_client.api_key},base_url:{test_client.base_url}")
+    print(test_client.chat_with_tools())
+
+
+if __name__ == "__main__":
+    testStreamableChatModelWithTools()
