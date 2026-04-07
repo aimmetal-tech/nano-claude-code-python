@@ -25,11 +25,13 @@ class ChatModel(ClaudeClient):
         messages: list[dict[str, Any]] = None,
         stream: bool = False,
         tools: list[Tool] = None,
+        system: str = "",
         **kwargs,
     ):
         super().__init__(**kwargs)
         self.messages = messages or []
         self.model = model
+        self.system = system
         self.stream = stream
         self.tools = tools or []
 
@@ -63,6 +65,7 @@ class ChatModel(ClaudeClient):
             "model": self.model,
             "messages": self.messages,
             "stream": self.stream,
+            "system": self.system,
         }
         if self.tools:
             requested_tools = [tool.to_request() for tool in self.tools]
@@ -132,9 +135,11 @@ class ChatModel(ClaudeClient):
 
 class StreamableChatModel(ChatModel):
     def __init__(
-        self, model: str, messages: list[dict[str, Any]] = None, stream: bool = True, **kwargs
+        self,
+        **kwargs,
     ):
-        super().__init__(model=model, messages=messages, stream=stream, **kwargs)
+        super().__init__(**kwargs)
+        self.stream = True
 
     def chat_with_tools(self):
         """
@@ -156,6 +161,7 @@ class StreamableChatModel(ChatModel):
                 if line_str.startswith("data:"):
                     data_json = line_str[6:]
 
+                    # 兼容 OpenRouter 的流式接口，OpenRouter在流式结束时会发送一个data: [DONE]的消息
                     if data_json == "[DONE]":
                         break
 
@@ -268,6 +274,7 @@ def testChatModelWithTools():
         model="claude-haiku-4-5",
         messages=[{"role": "user", "content": "你好！大连的天气怎么样？"}],
         tools=[get_weather_tool],
+        system="",
     )
     print(f"api_key:{test_client.api_key},base_url:{test_client.base_url}")
     print(test_client.chat_with_tools())
@@ -287,6 +294,7 @@ def testStreamableChatModelWithTools():
         model="claude-haiku-4-5",
         messages=[{"role": "user", "content": "你好! 大连的天气怎么样？"}],
         tools=[get_weather_tool],
+        system="",
     )
     print(f"api_key:{test_client.api_key},base_url:{test_client.base_url}")
     print(test_client.chat_with_tools())
