@@ -2,8 +2,7 @@ from collections.abc import Callable
 from typing import Any
 
 from agent.prompt import getNowSystemPrompt
-from agent.tools import filesystem
-from agent.tools.filesystem import newReadFileTool
+from agent.tools.filesystem import newEditFileTool, newReadFileTool, newWriteFileTool
 from claude.call import StreamableChatModel
 from claude.call_tool import Tool
 from claude.message import CLAUDE_MESSAGE_ROLE_USER
@@ -17,11 +16,13 @@ class Agent:
 
     def loadTools(self) -> None:
         filesystem_readfile_tool = newReadFileTool()
-        filesystem_writefile_tool = filesystem.newWriteFileTool()
+        filesystem_writefile_tool = newWriteFileTool()
+        filesystem_editfile_tool = newEditFileTool()
 
         try:
             self.tools.append(filesystem_readfile_tool)
             self.tools.append(filesystem_writefile_tool)
+            self.tools.append(filesystem_editfile_tool)
             self.api_client.tools = self.tools
         except Exception as e:
             print(f"加载工具失败: {e}")
