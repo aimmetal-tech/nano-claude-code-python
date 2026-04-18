@@ -32,9 +32,23 @@ cd .\nano-claude-code-python\
 code .
 ```
 
+在 ~/.nano-claude-code/config.json 中创建配置文件：
+``` json
+{
+    "baseurl": "your_base_url",
+    "apikey": "your_api_key",
+    "model": "claude-sonnet-4-6"
+}
+```
+
+或者用环境变量：
+    export NCC_LLM_BASE_URL="your_base_url"
+    export NCC_LLM_API_KEY="your_api_key"
+    export NCC_LLM_MODEL="claude-sonnet-4-6"
+
 ``` shell
 uv sync
-uv run python -m cmd.main --message "..."
+uv run python -m cmd.main --message "创建一个 hello.txt 文件，内容写 Hello World"
 ```
 `Direct` 模式: 非交互界面，接收一条输入直接执行并输出流式结果
 `TUI` 模式: 终端 UI 交互模式

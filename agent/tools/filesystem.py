@@ -1,4 +1,5 @@
 import os
+import subprocess
 from typing import Any
 
 from claude.call_tool import Tool, ToolPropertyDetail, newTool
@@ -96,4 +97,46 @@ def newWriteFileTool() -> Tool:
         },
         required=["path", "content"],
         func=writeFileLogic,
+    )
+
+
+def newBashTool() -> Tool:
+    def bashLogic(input: dict[str, Any]) -> str:
+        command = input["command"]
+        timeout = input.get("timeout", 30)
+
+        if not command:
+            return "command不能为空"
+
+        try:
+            result = subprocess.run(
+                command,
+                shell=True,
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+            )
+
+            if result.returncode == 0:
+                return result.stdout if result.stdout else result.stderr
+            else:
+                return f"Exit code: {result.returncode}\nstderr: {result.stderr}\nstdout: {result.stdout}"
+        except subprocess.TimeoutExpired:
+            return f"命令执行超时 ({timeout}s): {command}"
+        except Exception as e:
+            return f"执行命令失败: {e}"
+
+    return newTool(
+        name="bash",
+        description="执行命令行命令并返回输出,支持管道、重定向等shell特性",
+        properties={
+            "command": ToolPropertyDetail(
+                type="string", description="要执行的命令行命令"
+            ),
+            "timeout": ToolPropertyDetail(
+                type="number", description="超时秒数,默认30秒"
+            ),
+        },
+        required=["command"],
+        func=bashLogic,
     )

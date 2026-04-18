@@ -1,7 +1,5 @@
 {
-    "llm": {
-        "baseurl": "",
-        "apikey": "",
-        "model": ""
-    }
+    "baseurl": "",
+    "apikey": "",
+    "model": ""
 }

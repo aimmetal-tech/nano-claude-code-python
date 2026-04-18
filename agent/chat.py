@@ -2,7 +2,12 @@ from collections.abc import Callable
 from typing import Any
 
 from agent.prompt import getNowSystemPrompt
-from agent.tools.filesystem import newEditFileTool, newReadFileTool, newWriteFileTool
+from agent.tools.filesystem import (
+    newBashTool,
+    newEditFileTool,
+    newReadFileTool,
+    newWriteFileTool,
+)
 from claude.call import StreamableChatModel
 from claude.call_tool import Tool
 from claude.message import CLAUDE_MESSAGE_ROLE_USER
@@ -18,11 +23,13 @@ class Agent:
         filesystem_readfile_tool = newReadFileTool()
         filesystem_writefile_tool = newWriteFileTool()
         filesystem_editfile_tool = newEditFileTool()
+        filesystem_bash_tool = newBashTool()
 
         try:
             self.tools.append(filesystem_readfile_tool)
             self.tools.append(filesystem_writefile_tool)
             self.tools.append(filesystem_editfile_tool)
+            self.tools.append(filesystem_bash_tool)
             self.api_client.tools = self.tools
         except Exception as e:
             print(f"加载工具失败: {e}")
@@ -47,11 +54,7 @@ class Agent:
 
         self.api_client.messages = [{"role": CLAUDE_MESSAGE_ROLE_USER, "content": message}]
         self.api_client.system = getNowSystemPrompt()
-        tool_result = self.api_client.chat_with_tools(stream_callback=stream_handler)
-
-        # 当前流式实现在触发工具后会直接返回工具结果，这里需要显式透出给上层。
-        if isinstance(tool_result, str) and tool_result:
-            callback(f"\n{tool_result}\n")
+        self.api_client.chat_with_tools(stream_callback=stream_handler)
 
 
 def newAgent(base_url: str, api_key: str, model: str) -> Agent:

@@ -8,10 +8,7 @@ from claude.message import (
     CLAUDE_MESSAGE_ROLE_ASSISTANT,
     CLAUDE_MESSAGE_ROLE_USER,
 )
-from errors.errors import (
-    ClaudeClientError,
-    raise_for_status
-)
+from errors.errors import raise_for_status
 
 
 def deal_func(m: dict[str, Any]) -> bool:
@@ -59,6 +56,9 @@ class ChatModel(ClaudeClient):
             new_content = request_messages[-1]["content"]
             if isinstance(message["content"], str):
                 new_content = [{"type": "text", "text": message["content"]}]
+            # 处理: 当 message["content"] 已经是一个列表如 [{tool_result1}, {tool_result2}]
+            elif isinstance(message["content"], list):
+                new_content.extend(message["content"])
             else:
                 new_content.append(message["content"])
 
@@ -95,13 +95,14 @@ class ChatModel(ClaudeClient):
         # 避免读取大段的text影响性能
         if not (200 <= response_body.status_code < 300):
             raise_for_status(response_body.status_code, response_body.text)
-        
+
         response_body_json = response_body.json()
         return response_body_json["content"]
 
     def chat_with_tools(self):
         """
         向 Claude API 发送聊天消息(包括工具调用)并返回响应。
+        工具结果会追加到 messages 中再次发送给模型，直到模型不再调用工具。
         """
         while True:
             assistant_content = self.call()
@@ -115,11 +116,10 @@ class ChatModel(ClaudeClient):
                 for item in assistant_content:
                     if item["type"] == "text":
                         return item["text"]
-                    elif item["content"]:
-                        return item["content"]
                 return ""
 
-            tool_use_result = []
+            # 执行所有工具，收集结果
+            tool_results = []
             for tool_call in tool_calls:
                 tool_id = tool_call["id"]
                 tool_name = tool_call["name"]
@@ -127,22 +127,27 @@ class ChatModel(ClaudeClient):
 
                 target_tool = next((t for t in self.tools if t.name == tool_name), None)
 
-                tool_result = ""
                 if target_tool and target_tool.func:
                     print(f"\n正在调用工具: {tool_name}，输入: {tool_input}\n")
-                    tool_result = target_tool.func(tool_input)
-                    return tool_result
+                    result = target_tool.func(tool_input)
+                else:
+                    result = f"工具 {tool_name} 未找到"
 
-                tool_use_result.append(
+                tool_results.append(
                     {
                         "tool_use_id": tool_id,
                         "type": "tool_result",
-                        "content": tool_result,
+                        "content": result,
                     }
                 )
 
-            else:
-                raise ClaudeClientError("工具调用失败，未找到匹配的工具或工具执行失败。")
+            # 将工具结果追加为 user 消息，继续循环让模型看到结果
+            self.messages.append(
+                {
+                    "role": CLAUDE_MESSAGE_ROLE_USER,
+                    "content": tool_results,
+                }
+            )
 
 
 class StreamableChatModel(ChatModel):
@@ -153,15 +158,16 @@ class StreamableChatModel(ChatModel):
         super().__init__(**kwargs)
         self.stream = True
 
-    def chat_with_tools(
+    def _stream_one_round(
         self,
-        stream_callback: Callable[[dict[str, Any]], bool] | None = None,
-    ):
+        event_handler: Callable[[dict[str, Any]], bool],
+    ) -> list[dict[str, Any]]:
         """
-        向 Claude API 发送聊天消息并以流式方式返回响应。
+        发送一次流式请求，解析 SSE 事件，返回解析后的 content blocks 列表。
+        每个元素形如 {"type": "text", "text": "..."} 或
+        {"type": "tool_use", "id": "...", "name": "...", "partial_json": "..."}.
         """
         body = self._get_request_body()
-        event_handler = stream_callback or deal_func
         response_body = self._session.post(
             url=f"{self.base_url}/v1/messages",
             json=body,
@@ -171,8 +177,8 @@ class StreamableChatModel(ChatModel):
         # 避免读取大段的text影响性能
         if not (200 <= response_body.status_code < 300):
             raise_for_status(response_body.status_code, response_body.text)
-        
-        res_message: list[dict[str, Any]] = []
+
+        content_blocks: list[dict[str, Any]] = []
         try:
             for line in response_body.iter_lines():
                 if not line:
@@ -188,90 +194,124 @@ class StreamableChatModel(ChatModel):
                         break
 
                     data_dict = json.loads(data_json)
-
                     event_type = data_dict["type"]
 
                     if event_type == "content_block_start":
-                        res_message.append({"role": CLAUDE_MESSAGE_ROLE_ASSISTANT, "content": ""})
-                        content = {}
                         content_block = data_dict["content_block"]
-
                         if content_block["type"] == "text":
-                            content = {"type": "text", "text": content_block["text"]}
+                            content_blocks.append({"type": "text", "text": content_block["text"]})
                         elif content_block["type"] == "tool_use":
-                            content = {
-                                "id": content_block["id"],
-                                "type": "tool_use",
-                                "name": content_block["name"],
-                            }
-                        res_message[-1]["content"] = content
+                            content_blocks.append(
+                                {
+                                    "id": content_block["id"],
+                                    "type": "tool_use",
+                                    "name": content_block["name"],
+                                    "partial_json": "",
+                                }
+                            )
+
                     elif event_type == "content_block_delta":
+                        current = content_blocks[-1]
                         continue_flag = True
-                        if res_message[-1]["content"]["type"] == "text":
-                            res_message[-1]["content"] = {
-                                "type": "text",
-                                "text": res_message[-1]["content"]["text"]
-                                + data_dict["delta"]["text"],
-                            }
+
+                        if current["type"] == "text":
+                            delta_text = data_dict["delta"]["text"]
+                            current["text"] += delta_text
                             continue_flag = event_handler(
                                 {
                                     "role": CLAUDE_MESSAGE_ROLE_ASSISTANT,
-                                    "content": {
-                                        "type": "text",
-                                        "text": data_dict["delta"]["text"],
-                                    },
+                                    "content": {"type": "text", "text": delta_text},
                                 }
                             )
-                        elif res_message[-1]["content"]["type"] == "tool_use":
-                            current_content = res_message[-1]["content"]
-                            old_partial = current_content.get("partial_json", "")
-                            new_partial = data_dict["delta"]["partial_json"]
-
-                            current_content["partial_json"] = old_partial + new_partial
-
+                        elif current["type"] == "tool_use":
+                            delta_json = data_dict["delta"]["partial_json"]
+                            current["partial_json"] += delta_json
                             continue_flag = event_handler(
                                 {
                                     "role": CLAUDE_MESSAGE_ROLE_ASSISTANT,
                                     "content": {
                                         "type": "tool_use",
-                                        "id": current_content["id"],
-                                        "name": current_content["name"],
-                                        "partial_json": new_partial,
+                                        "id": current["id"],
+                                        "name": current["name"],
+                                        "partial_json": delta_json,
                                     },
                                 }
                             )
 
                         if not continue_flag:
                             break
-
-            tool_use_blocks = [
-                item for item in res_message if item["content"]["type"] == "tool_use"
-            ]
-
-            if not tool_use_blocks:
-                return "".join(
-                    [
-                        item["content"]["text"]
-                        for item in res_message
-                        if item["content"]["type"] == "text"
-                    ]
-                )
-
-            for tool_use in tool_use_blocks:
-                tool_name = tool_use["content"]["name"]
-                target_tool = next((t for t in self.tools if t.name == tool_name), None)
-
-                if target_tool:
-                    args = json.loads(tool_use["content"]["partial_json"])
-                    result = target_tool.func(args)
-
-                    return result
-
-        except Exception as e:
-            raise ClaudeClientError(f"Error while streaming response: {str(e)}")
-
         finally:
             response_body.close()
+
+        return content_blocks
+
+    def chat_with_tools(
+        self,
+        stream_callback: Callable[[dict[str, Any]], bool] | None = None,
+    ):
+        """
+        向 Claude API 发送聊天消息并以流式方式返回响应。
+        工具结果会追加到 messages 中再次发送给模型，直到模型不再调用工具。
+        """
+        event_handler = stream_callback or deal_func
+
+        while True:
+            content_blocks = self._stream_one_round(event_handler)
+
+            tool_use_blocks = [b for b in content_blocks if b["type"] == "tool_use"]
+
+            if not tool_use_blocks:
+                return "".join(b["text"] for b in content_blocks if b["type"] == "text")
+
+            # 构造 assistant 消息（将 partial_json 解析为 input）
+            assistant_content = []
+            for block in content_blocks:
+                if block["type"] == "text":
+                    assistant_content.append({"type": "text", "text": block["text"]})
+                elif block["type"] == "tool_use":
+                    assistant_content.append(
+                        {
+                            "type": "tool_use",
+                            "id": block["id"],
+                            "name": block["name"],
+                            "input": json.loads(block["partial_json"]),
+                        }
+                    )
+            self.messages.append(
+                {
+                    "role": CLAUDE_MESSAGE_ROLE_ASSISTANT,
+                    "content": assistant_content,
+                }
+            )
+
+            # 执行工具，收集结果
+            tool_results = []
+            for block in tool_use_blocks:
+                tool_name = block["name"]
+                tool_id = block["id"]
+                target_tool = next((t for t in self.tools if t.name == tool_name), None)
+
+                if target_tool and target_tool.func:
+                    args = json.loads(block["partial_json"])
+                    result = target_tool.func(args)
+                else:
+                    result = f"工具 {tool_name} 未找到"
+
+                tool_results.append(
+                    {
+                        "tool_use_id": tool_id,
+                        "type": "tool_result",
+                        "content": result,
+                    }
+                )
+
+            # 将工具结果追加为 user 消息，继续循环让模型看到结果
+            self.messages.append(
+                {
+                    "role": CLAUDE_MESSAGE_ROLE_USER,
+                    "content": tool_results,
+                }
+            )
 
 
 def newTestClient() -> ChatModel:
